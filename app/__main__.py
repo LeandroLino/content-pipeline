@@ -4,24 +4,58 @@ import sys
 
 from app.ingest.reddit import (
     RedditIngestError,
-    fetch_from_fixture,
+    fetch_from_fixture as fetch_reddit_fixture,
     fetch_reddit_post,
+)
+from app.ingest.web import (
+    WebIngestError,
+    fetch_from_fixture as fetch_web_fixture,
+    fetch_web_article,
 )
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--url", help="Reddit post URL (needs API credentials)")
-    group.add_argument("--fixture", help="Path to a local JSON fixture file")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    reddit = sub.add_parser("reddit", help="Ingest a Reddit post")
+    reddit_source = reddit.add_mutually_exclusive_group(required=True)
+    reddit_source.add_argument("--url", help="Reddit post URL (needs API credentials)")
+    reddit_source.add_argument("--fixture", help="Local JSON fixture file path")
+
+    web = sub.add_parser("web", help="Ingest a web article (Medium, etc.)")
+    web_source = web.add_mutually_exclusive_group(required=True)
+    web_source.add_argument("--url", help="Article URL")
+    web_source.add_argument("--fixture", help="Local HTML fixture file path")
+    web.add_argument(
+        "--as-url",
+        help="Original URL to record when using --fixture",
+    )
+
+    return parser
+
+
+def main() -> int:
+    parser = _build_parser()
     args = parser.parse_args()
 
     try:
-        if args.fixture:
-            payload = fetch_from_fixture(args.fixture)
+        if args.command == "reddit":
+            payload = (
+                fetch_reddit_fixture(args.fixture)
+                if args.fixture
+                else fetch_reddit_post(args.url)
+            )
         else:
-            payload = fetch_reddit_post(args.url)
-    except RedditIngestError as exc:
+            if args.fixture and not args.as_url:
+                print("error: --as-url is required with --fixture", file=sys.stderr)
+                return 2
+            payload = (
+                fetch_web_fixture(args.fixture, args.as_url)
+                if args.fixture
+                else fetch_web_article(args.url)
+            )
+    except (RedditIngestError, WebIngestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
