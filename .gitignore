@@ -12,3 +12,4 @@ venv/
 tmp/
 build/
 dist/
+data/ingested/

@@ -2,16 +2,17 @@ import argparse
 import json
 import sys
 
+from app.ingest.medium import (
+    MediumIngestError,
+    fetch_from_fixture as fetch_medium_fixture,
+    fetch_web_article,
+)
 from app.ingest.reddit import (
     RedditIngestError,
     fetch_from_fixture as fetch_reddit_fixture,
     fetch_reddit_post,
 )
-from app.ingest.web import (
-    WebIngestError,
-    fetch_from_fixture as fetch_web_fixture,
-    fetch_web_article,
-)
+from app.storage import save_ingest_payload
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -22,15 +23,17 @@ def _build_parser() -> argparse.ArgumentParser:
     reddit_source = reddit.add_mutually_exclusive_group(required=True)
     reddit_source.add_argument("--url", help="Reddit post URL (needs API credentials)")
     reddit_source.add_argument("--fixture", help="Local JSON fixture file path")
+    reddit.add_argument("--no-save", action="store_true", help="Skip saving to data/ingested/")
 
-    web = sub.add_parser("web", help="Ingest a web article (Medium, etc.)")
-    web_source = web.add_mutually_exclusive_group(required=True)
-    web_source.add_argument("--url", help="Article URL")
-    web_source.add_argument("--fixture", help="Local HTML fixture file path")
-    web.add_argument(
+    medium = sub.add_parser("web", help="Ingest a Medium article (via Freedium)")
+    medium_source = medium.add_mutually_exclusive_group(required=True)
+    medium_source.add_argument("--url", help="Article URL")
+    medium_source.add_argument("--fixture", help="Local Freedium __data.json fixture file path")
+    medium.add_argument(
         "--as-url",
         help="Original URL to record when using --fixture",
     )
+    medium.add_argument("--no-save", action="store_true", help="Skip saving to data/ingested/")
 
     return parser
 
@@ -51,15 +54,21 @@ def main() -> int:
                 print("error: --as-url is required with --fixture", file=sys.stderr)
                 return 2
             payload = (
-                fetch_web_fixture(args.fixture, args.as_url)
+                fetch_medium_fixture(args.fixture, args.as_url)
                 if args.fixture
                 else fetch_web_article(args.url)
             )
-    except (RedditIngestError, WebIngestError) as exc:
+    except (RedditIngestError, MediumIngestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     print(json.dumps(payload.model_dump(mode="json"), indent=2, ensure_ascii=False))
+
+    if not args.no_save:
+        saved = save_ingest_payload(payload)
+        print(f"saved to: {saved.json_path}", file=sys.stderr)
+        print(f"saved to: {saved.md_path}", file=sys.stderr)
+
     return 0
 
 
