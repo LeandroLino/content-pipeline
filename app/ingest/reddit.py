@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import praw
+from bs4 import BeautifulSoup
+from bs4.element import Tag
+from markdownify import markdownify as md
 from prawcore.exceptions import PrawcoreException
 
 from app.config import RedditConfig, load_reddit_config
@@ -156,3 +159,145 @@ def fetch_from_fixture(path: str | Path) -> IngestPayload:
 
     submission = _submission_from_fixture(post)
     return _to_payload(submission, original_url)
+
+
+# --- Browser-based fallback (Camoufox) ---------------------------------
+#
+# PRAW needs a registered OAuth app (client_id/secret). Reddit's public
+# `.json` endpoint also 403s even when requested from within a real browser
+# context (checked empirically), so when no app is registered the only way
+# left to fetch a post is to render the page in an actual browser and scrape
+# the `<shreddit-post>` web component the client hydrates it into. Camoufox
+# is a stealth Firefox build (patched to resist bot fingerprinting), used
+# instead of stock Playwright to reduce the chance of getting blocked.
+
+
+def _fetch_rendered_html(url: str, headless: bool = True, timeout_ms: int = 30000) -> str:
+    """Render a Reddit post page in a real browser and return its HTML."""
+    from camoufox.sync_api import Camoufox
+
+    with Camoufox(headless=headless, humanize=True) as browser:
+        page = browser.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_selector("shreddit-post", timeout=timeout_ms)
+        # Gallery images and the text body finish hydrating shortly after
+        # the custom element appears; a short settle avoids truncated content.
+        page.wait_for_timeout(1500)
+        return page.content()
+
+
+def _parse_srcset_best(srcset: str | None) -> str | None:
+    """Pick the highest-resolution URL from an HTML `srcset` attribute."""
+    if not srcset:
+        return None
+    best_width = -1
+    best_url: str | None = None
+    for candidate in srcset.split(","):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        parts = candidate.rsplit(" ", 1)
+        url = parts[0]
+        width = 0
+        if len(parts) == 2 and parts[1].endswith("w"):
+            try:
+                width = int(parts[1][:-1])
+            except ValueError:
+                width = 0
+        if width >= best_width:
+            best_width = width
+            best_url = url
+    return best_url
+
+
+def _best_image_url(img: Tag) -> str | None:
+    src = img.get("data-lazy-src") or img.get("src")
+    srcset = img.get("data-lazy-srcset") or img.get("srcset")
+    chosen = _parse_srcset_best(srcset) or src
+    return chosen.replace("&amp;", "&") if chosen else None
+
+
+def _extract_gallery_media(soup: BeautifulSoup) -> list[str]:
+    urls: list[str] = []
+    for img in soup.select("gallery-carousel img.media-lightbox-img"):
+        best = _best_image_url(img)
+        if best:
+            urls.append(best)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped
+
+
+def _extract_single_media(post: Tag) -> list[str]:
+    """Non-gallery posts: the hero image lives in the post-media-container slot."""
+    img = post.select_one('div[slot="post-media-container"] img')
+    if img is None:
+        return []
+    best = _best_image_url(img)
+    return [best] if best else []
+
+
+def _extract_body_markdown(soup: BeautifulSoup, post_id: str) -> str:
+    content_div = soup.select_one(f"#{post_id}-post-rtjson-content")
+    if content_div is None:
+        return ""
+    markdown = md(str(content_div), heading_style="ATX", strip=["script", "style"])
+    return re.sub(r"\n{3,}", "\n\n", markdown).strip()
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_shreddit_post(html: str, url: str) -> IngestPayload:
+    soup = BeautifulSoup(html, "html.parser")
+    post = soup.select_one("shreddit-post")
+    if post is None:
+        raise RedditIngestError(
+            "could not locate <shreddit-post> element (page blocked or layout changed)"
+        )
+
+    post_id = post.get("id", "") or ""
+    post_type = post.get("post-type", "")
+    media_urls = (
+        _extract_gallery_media(soup) if post_type == "gallery" else _extract_single_media(post)
+    )
+
+    return IngestPayload(
+        source="reddit",
+        original_url=url,
+        raw_title=post.get("post-title", "") or "",
+        raw_content=_extract_body_markdown(soup, post_id) if post_id else "",
+        media_urls=media_urls,
+        metadata={
+            "subreddit": post.get("subreddit-name"),
+            "author": post.get("author"),
+            "score": _to_int(post.get("score")),
+            "num_comments": _to_int(post.get("comment-count")),
+            "created_utc": post.get("created-timestamp"),
+            "over_18": post.has_attr("nsfw"),
+        },
+    )
+
+
+def fetch_reddit_post_browser(url: str, html: str | None = None, headless: bool = True) -> IngestPayload:
+    """Fetch a Reddit post by driving a real (stealth) browser via Camoufox.
+
+    Bypasses PRAW/OAuth entirely -- useful while no Reddit app is registered.
+    Pass `html` to skip the browser launch (used in tests/fixtures).
+    """
+    try:
+        rendered = html if html is not None else _fetch_rendered_html(url, headless=headless)
+    except RedditIngestError:
+        raise
+    except Exception as exc:  # camoufox/playwright errors (timeout, launch failure, etc.)
+        raise RedditIngestError(f"browser fetch failed: {exc}") from exc
+
+    return _parse_shreddit_post(rendered, url)

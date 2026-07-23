@@ -11,6 +11,7 @@ from app.ingest.reddit import (
     RedditIngestError,
     fetch_from_fixture as fetch_reddit_fixture,
     fetch_reddit_post,
+    fetch_reddit_post_browser,
 )
 from app.storage import save_ingest_payload
 
@@ -21,9 +22,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     reddit = sub.add_parser("reddit", help="Ingest a Reddit post")
     reddit_source = reddit.add_mutually_exclusive_group(required=True)
-    reddit_source.add_argument("--url", help="Reddit post URL (needs API credentials)")
+    reddit_source.add_argument("--url", help="Reddit post URL (uses a stealth browser by default)")
     reddit_source.add_argument("--fixture", help="Local JSON fixture file path")
     reddit.add_argument("--no-save", action="store_true", help="Skip saving to data/ingested/")
+    reddit.add_argument(
+        "--praw",
+        action="store_true",
+        help="Use PRAW/OAuth instead of the browser; requires a registered Reddit app in .env",
+    )
 
     medium = sub.add_parser("web", help="Ingest a Medium article (via Freedium)")
     medium_source = medium.add_mutually_exclusive_group(required=True)
@@ -44,11 +50,12 @@ def main() -> int:
 
     try:
         if args.command == "reddit":
-            payload = (
-                fetch_reddit_fixture(args.fixture)
-                if args.fixture
-                else fetch_reddit_post(args.url)
-            )
+            if args.fixture:
+                payload = fetch_reddit_fixture(args.fixture)
+            elif args.praw:
+                payload = fetch_reddit_post(args.url)
+            else:
+                payload = fetch_reddit_post_browser(args.url)
         else:
             if args.fixture and not args.as_url:
                 print("error: --as-url is required with --fixture", file=sys.stderr)
