@@ -30,3 +30,23 @@ def load_reddit_config() -> RedditConfig:
         client_secret=_require("REDDIT_CLIENT_SECRET"),
         user_agent=_require("REDDIT_USER_AGENT"),
     )
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    provider: str
+    openai_api_key: str | None
+    gemini_api_key: str | None
+
+
+def load_llm_config() -> LLMConfig:
+    """Read LLM provider selection + API keys from env.
+
+    `LLM_PROVIDER` defaults to "stub" (no network, no key needed) so the
+    pipeline stays runnable without any LLM credentials configured.
+    """
+    return LLMConfig(
+        provider=os.getenv("LLM_PROVIDER", "stub").strip().lower(),
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
+    )

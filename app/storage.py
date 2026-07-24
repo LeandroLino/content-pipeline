@@ -46,6 +46,11 @@ def _build_markdown(payload: IngestPayload) -> str:
     return "\n".join(lines)
 
 
+def load_ingest_payload(json_path: Path | str) -> IngestPayload:
+    """Load a previously saved IngestPayload JSON file back into a model."""
+    return IngestPayload.model_validate_json(Path(json_path).read_text(encoding="utf-8"))
+
+
 def save_ingest_payload(payload: IngestPayload, base_dir: Path | str = INGESTED_DIR) -> SavedPaths:
     """Persist an IngestPayload as JSON + Markdown under data/ingested/{source}/.
 

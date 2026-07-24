@@ -5,3 +5,6 @@ requests==2.34.2
 beautifulsoup4==4.12.3
 markdownify==1.2.3
 camoufox[geoip]==0.5.4
+pillow==12.3.0
+google-genai==2.14.0
+openai==2.48.0

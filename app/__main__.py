@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from app.ingest.medium import (
     MediumIngestError,
@@ -13,7 +14,10 @@ from app.ingest.reddit import (
     fetch_reddit_post,
     fetch_reddit_post_browser,
 )
-from app.storage import save_ingest_payload
+from app.llm.base import LLMError
+from app.llm.factory import generate_image_post
+from app.media.image_post import DEFAULT_WATERMARK_PATH, build_carousel
+from app.storage import load_ingest_payload, save_ingest_payload
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,12 +45,65 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     medium.add_argument("--no-save", action="store_true", help="Skip saving to data/ingested/")
 
+    image_post = sub.add_parser(
+        "image-post", help="Generate an Instagram image-post (carousel) from an ingested payload"
+    )
+    image_post.add_argument(
+        "--ingest-json", required=True, help="Path to a saved IngestPayload JSON (from data/ingested/)"
+    )
+    image_post.add_argument(
+        "--output-dir", help="Where to save the carousel images + caption.txt (default: data/posts/{stem})"
+    )
+    image_post.add_argument(
+        "--watermark", help="Path to a watermark PNG (default: bundled placeholder)"
+    )
+    image_post.add_argument(
+        "--max-images", type=int, default=None, help="Limit how many media_urls to process (default: all)"
+    )
+
     return parser
+
+
+def _run_image_post(args: argparse.Namespace) -> int:
+    payload = load_ingest_payload(args.ingest_json)
+
+    if not payload.media_urls:
+        print("error: ingested payload has no media_urls to build a carousel from", file=sys.stderr)
+        return 1
+
+    try:
+        image_post = generate_image_post(payload)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    stem = Path(args.ingest_json).stem
+    output_dir = Path(args.output_dir) if args.output_dir else Path("data/posts") / stem
+    watermark_path = args.watermark or DEFAULT_WATERMARK_PATH
+
+    urls = [str(u) for u in payload.media_urls]
+    if args.max_images:
+        urls = urls[: args.max_images]
+
+    saved_images = build_carousel(urls, image_post.image_caption, output_dir, watermark_path)
+
+    caption_path = output_dir / "caption.txt"
+    caption_path.write_text(image_post.post_caption, encoding="utf-8")
+
+    print(f"image_caption: {image_post.image_caption}")
+    print(f"post_caption saved to: {caption_path}")
+    for path in saved_images:
+        print(f"image saved to: {path}")
+
+    return 0
 
 
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.command == "image-post":
+        return _run_image_post(args)
 
     try:
         if args.command == "reddit":
