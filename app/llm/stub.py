@@ -30,5 +30,14 @@ def generate_image_post(payload: IngestPayload) -> ImagePost:
     post_caption = "\n\n".join(post_caption_parts)
 
     image_caption = _truncate(title, IMAGE_CAPTION_MAX_CHARS)
+    visual_prompt = (
+        "A blurred, moody background photo with soft bokeh, dark ambient "
+        "lighting, out of focus, cinematic, shallow depth of field."
+    )
 
-    return ImagePost(post_caption=post_caption, image_caption=image_caption)
+    return ImagePost(
+        post_caption=post_caption,
+        image_caption=image_caption,
+        visual_prompt=visual_prompt,
+        category="CURIOSIDADE",
+    )

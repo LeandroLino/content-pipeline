@@ -67,10 +67,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def _run_image_post(args: argparse.Namespace) -> int:
     payload = load_ingest_payload(args.ingest_json)
 
-    if not payload.media_urls:
-        print("error: ingested payload has no media_urls to build a carousel from", file=sys.stderr)
-        return 1
-
     try:
         image_post = generate_image_post(payload)
     except LLMError as exc:
@@ -85,7 +81,25 @@ def _run_image_post(args: argparse.Namespace) -> int:
     if args.max_images:
         urls = urls[: args.max_images]
 
-    saved_images = build_carousel(urls, image_post.image_caption, output_dir, watermark_path)
+    if not urls:
+        print(
+            "warning: ingested payload has no media_urls -- generating a fallback image via AI "
+            "(Pollinations.ai) from the LLM's visual_prompt",
+            file=sys.stderr,
+        )
+
+    try:
+        saved_images = build_carousel(
+            urls,
+            image_post.image_caption,
+            image_post.category,
+            output_dir,
+            watermark_path,
+            image_post.visual_prompt,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     caption_path = output_dir / "caption.txt"
     caption_path.write_text(image_post.post_caption, encoding="utf-8")

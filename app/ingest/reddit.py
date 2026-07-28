@@ -14,6 +14,7 @@ from app.config import RedditConfig, load_reddit_config
 from app.schemas import IngestPayload
 
 IMAGE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp|mp4)$", re.IGNORECASE)
+TOP_COMMENTS_LIMIT = 5
 
 
 class RedditIngestError(Exception):
@@ -58,13 +59,34 @@ def _extract_media_urls(submission: Any) -> list[str]:
     return deduped
 
 
-def _to_payload(submission: Any, url: str) -> IngestPayload:
+def _extract_top_comments_praw(submission: Any, limit: int = TOP_COMMENTS_LIMIT) -> list[str]:
+    """Fetch the top-voted top-level comments via PRAW, as plain text."""
+    comments = getattr(submission, "comments", None)
+    if comments is None:
+        return []
+    try:
+        comments.replace_more(limit=0)  # drop "load more comments" placeholders
+        top_level = list(comments)
+    except Exception:
+        return []
+
+    scored = [
+        (getattr(c, "score", 0) or 0, getattr(c, "body", "") or "")
+        for c in top_level
+        if getattr(c, "body", None)
+    ]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [body.strip() for _, body in scored[:limit] if body.strip()]
+
+
+def _to_payload(submission: Any, url: str, top_comments: list[str] | None = None) -> IngestPayload:
     return IngestPayload(
         source="reddit",
         original_url=url,
         raw_title=getattr(submission, "title", "") or "",
         raw_content=getattr(submission, "selftext", "") or "",
         media_urls=_extract_media_urls(submission),
+        top_comments=top_comments or [],
         metadata={
             "subreddit": getattr(getattr(submission, "subreddit", None), "display_name", None),
             "author": getattr(getattr(submission, "author", None), "name", None),
@@ -87,7 +109,8 @@ def fetch_reddit_post(url: str, client: praw.Reddit | None = None) -> IngestPayl
     except Exception as exc:
         raise RedditIngestError(f"failed to load submission: {exc}") from exc
 
-    return _to_payload(submission, url)
+    top_comments = _extract_top_comments_praw(submission)
+    return _to_payload(submission, url, top_comments=top_comments)
 
 
 def _extract_post_from_listing(data: Any) -> dict:
@@ -112,6 +135,32 @@ def _get_field(post: dict, *keys: str) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _extract_top_comments_from_listing(data: Any, limit: int = TOP_COMMENTS_LIMIT) -> list[str]:
+    """Extract top-voted top-level comments from a Reddit Listing's 2nd element.
+
+    Reddit's `.json` endpoint (and fixtures saved from it) return a 2-item
+    array: `[post_listing, comments_listing]`. Only present for the full
+    Listing shape -- a flat post dict (no comments_listing) yields [].
+    """
+    if not isinstance(data, list) or len(data) < 2:
+        return []
+    try:
+        children = data[1]["data"]["children"]
+    except (KeyError, IndexError, TypeError):
+        return []
+
+    scored: list[tuple[int, str]] = []
+    for child in children:
+        comment = child.get("data", {}) if isinstance(child, dict) else {}
+        body = comment.get("body")
+        if not body or body in ("[deleted]", "[removed]"):
+            continue
+        scored.append((comment.get("score", 0) or 0, body.strip()))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [body for _, body in scored[:limit]]
 
 
 def _submission_from_fixture(post: dict) -> SimpleNamespace:
@@ -158,7 +207,8 @@ def fetch_from_fixture(path: str | Path) -> IngestPayload:
         raise RedditIngestError("fixture missing 'permalink', 'original_url', or 'url'")
 
     submission = _submission_from_fixture(post)
-    return _to_payload(submission, original_url)
+    top_comments = _extract_top_comments_from_listing(raw)
+    return _to_payload(submission, original_url, top_comments=top_comments)
 
 
 # --- Browser-based fallback (Camoufox) ---------------------------------
@@ -256,6 +306,30 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _extract_top_comments(soup: BeautifulSoup, limit: int = TOP_COMMENTS_LIMIT) -> list[str]:
+    """Extract the top-voted top-level (depth=0) comments as plain text.
+
+    Reddit renders each comment as a `<shreddit-comment>` custom element; its
+    body lives in a sibling `div#{thingid}-comment-rtjson-content`, the same
+    pattern as the post body (`#{post_id}-post-rtjson-content`).
+    """
+    scored: list[tuple[int, str]] = []
+    for comment in soup.select('shreddit-comment[depth="0"]'):
+        thing_id = comment.get("thingid")
+        if not thing_id:
+            continue
+        content_div = soup.select_one(f"#{thing_id}-comment-rtjson-content")
+        if content_div is None:
+            continue
+        text = content_div.get_text(separator=" ", strip=True)
+        if not text:
+            continue
+        scored.append((_to_int(comment.get("score")) or 0, text))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [text for _, text in scored[:limit]]
+
+
 def _parse_shreddit_post(html: str, url: str) -> IngestPayload:
     soup = BeautifulSoup(html, "html.parser")
     post = soup.select_one("shreddit-post")
@@ -276,6 +350,7 @@ def _parse_shreddit_post(html: str, url: str) -> IngestPayload:
         raw_title=post.get("post-title", "") or "",
         raw_content=_extract_body_markdown(soup, post_id) if post_id else "",
         media_urls=media_urls,
+        top_comments=_extract_top_comments(soup),
         metadata={
             "subreddit": post.get("subreddit-name"),
             "author": post.get("author"),

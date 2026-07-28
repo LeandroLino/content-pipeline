@@ -15,7 +15,7 @@ SAMPLE_PAYLOAD = IngestPayload(
 
 
 def test_image_post_schema_valid():
-    post = ImagePost(post_caption="Legenda longa", image_caption="Legenda curta")
+    post = ImagePost(post_caption="Legenda longa", image_caption="Legenda curta", visual_prompt="cena de teste", category="NOTÍCIA")
     assert post.post_caption == "Legenda longa"
     assert post.image_caption == "Legenda curta"
 
@@ -70,3 +70,99 @@ def test_factory_raises_on_unknown_provider():
         assert False, "expected LLMError"
     except LLMError as exc:
         assert "unknown" in str(exc)
+
+
+def _fake_generator(result=None, error=None):
+    def _generate(payload, api_key):
+        if error is not None:
+            raise error
+        return result
+
+    return _generate
+
+
+def test_factory_falls_back_to_openai_when_gemini_fails_at_runtime(monkeypatch):
+    fallback_post = ImagePost(post_caption="via openai", image_caption="curta", visual_prompt="cena de teste", category="NOTÍCIA")
+    monkeypatch.setattr(
+        "app.llm.gemini_provider.generate_image_post",
+        _fake_generator(error=LLMError("Gemini request failed: boom")),
+    )
+    monkeypatch.setattr(
+        "app.llm.openai_provider.generate_image_post", _fake_generator(result=fallback_post)
+    )
+    config = LLMConfig(provider="gemini", openai_api_key="sk-test", gemini_api_key="gm-test")
+
+    result = generate_image_post(SAMPLE_PAYLOAD, config=config)
+
+    assert result is fallback_post
+
+
+def test_factory_falls_back_to_gemini_when_openai_fails_at_runtime(monkeypatch):
+    fallback_post = ImagePost(post_caption="via gemini", image_caption="curta", visual_prompt="cena de teste", category="NOTÍCIA")
+    monkeypatch.setattr(
+        "app.llm.openai_provider.generate_image_post",
+        _fake_generator(error=LLMError("OpenAI request failed: boom")),
+    )
+    monkeypatch.setattr(
+        "app.llm.gemini_provider.generate_image_post", _fake_generator(result=fallback_post)
+    )
+    config = LLMConfig(provider="openai", openai_api_key="sk-test", gemini_api_key="gm-test")
+
+    result = generate_image_post(SAMPLE_PAYLOAD, config=config)
+
+    assert result is fallback_post
+
+
+def test_factory_falls_back_when_primary_key_missing_but_secondary_configured(monkeypatch):
+    fallback_post = ImagePost(post_caption="via openai", image_caption="curta", visual_prompt="cena de teste", category="NOTÍCIA")
+    monkeypatch.setattr(
+        "app.llm.openai_provider.generate_image_post", _fake_generator(result=fallback_post)
+    )
+    # gemini_api_key missing -- factory shouldn't even try calling the SDK,
+    # it should just move on to openai since a key IS configured for it.
+    config = LLMConfig(provider="gemini", openai_api_key="sk-test", gemini_api_key=None)
+
+    result = generate_image_post(SAMPLE_PAYLOAD, config=config)
+
+    assert result is fallback_post
+
+
+def test_factory_raises_when_every_real_provider_fails(monkeypatch):
+    monkeypatch.setattr(
+        "app.llm.gemini_provider.generate_image_post",
+        _fake_generator(error=LLMError("Gemini request failed: boom")),
+    )
+    monkeypatch.setattr(
+        "app.llm.openai_provider.generate_image_post",
+        _fake_generator(error=LLMError("OpenAI request failed: boom")),
+    )
+    config = LLMConfig(provider="gemini", openai_api_key="sk-test", gemini_api_key="gm-test")
+
+    try:
+        generate_image_post(SAMPLE_PAYLOAD, config=config)
+        assert False, "expected LLMError"
+    except LLMError as exc:
+        assert "gemini" in str(exc) and "openai" in str(exc)
+
+
+def test_factory_never_falls_back_to_stub_silently(monkeypatch):
+    # Even if both real providers fail, the factory must not silently swap
+    # to the deterministic stub -- that could ship low-quality captions to
+    # production unnoticed.
+    monkeypatch.setattr(
+        "app.llm.gemini_provider.generate_image_post",
+        _fake_generator(error=LLMError("Gemini request failed: boom")),
+    )
+    monkeypatch.setattr(
+        "app.llm.openai_provider.generate_image_post",
+        _fake_generator(error=LLMError("OpenAI request failed: boom")),
+    )
+    config = LLMConfig(provider="gemini", openai_api_key="sk-test", gemini_api_key="gm-test")
+
+    try:
+        generate_image_post(SAMPLE_PAYLOAD, config=config)
+        assert False, "expected LLMError, not a silent stub fallback"
+    except LLMError:
+        pass
+
+

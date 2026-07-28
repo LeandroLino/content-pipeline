@@ -9,7 +9,7 @@ from app.llm.base import LLMError
 from app.llm.prompts import build_prompt
 from app.schemas import ImagePost, IngestPayload
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
 
 
 def generate_image_post(payload: IngestPayload, api_key: str, model: str = DEFAULT_MODEL) -> ImagePost:

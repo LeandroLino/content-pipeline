@@ -38,6 +38,21 @@ GALLERY_POST_HTML = """
   <div id="t3_abc123-post-rtjson-content">
     <p>Corpo <a href="https://example.com/ref">do post</a>.</p>
   </div>
+  <shreddit-comment depth="0" score="15" author="carla" thingid="t1_low">
+    <div id="t1_low-comment-rtjson-content" class="md" slot="comment">
+      <p>Comentário com poucos votos.</p>
+    </div>
+  </shreddit-comment>
+  <shreddit-comment depth="0" score="120" author="davi" thingid="t1_top">
+    <div id="t1_top-comment-rtjson-content" class="md" slot="comment">
+      <p>Comentário mais votado.</p>
+    </div>
+  </shreddit-comment>
+  <shreddit-comment depth="1" score="999" author="reply" thingid="t1_reply">
+    <div id="t1_reply-comment-rtjson-content" class="md" slot="comment">
+      <p>Resposta aninhada, não deve contar.</p>
+    </div>
+  </shreddit-comment>
 </shreddit-post>
 </body></html>
 """
@@ -156,6 +171,33 @@ def test_fetch_reddit_post_normalizes_payload():
     assert payload.metadata["score"] == 42
 
 
+def test_fetch_reddit_post_extracts_top_comments_via_praw():
+    def _make_comment(body, score):
+        return SimpleNamespace(body=body, score=score)
+
+    comments = MagicMock()
+    comments.replace_more = MagicMock()
+    comments.__iter__ = lambda self: iter(
+        [
+            _make_comment("comentário baixo", 1),
+            _make_comment("comentário top", 50),
+            _make_comment("comentário médio", 10),
+        ]
+    )
+
+    sub = _make_submission(title="Hello", selftext="World")
+    sub.comments = comments
+    client = _fake_client(sub)
+
+    payload = fetch_reddit_post(
+        "https://reddit.com/r/programming/comments/abc/hello/",
+        client=client,
+    )
+
+    comments.replace_more.assert_called_once_with(limit=0)
+    assert payload.top_comments == ["comentário top", "comentário médio", "comentário baixo"]
+
+
 def test_fetch_reddit_post_raises_on_prawcore_error():
     sub = _make_submission()
     sub._fetch.side_effect = PrawcoreException("boom")
@@ -183,6 +225,12 @@ def test_fetch_from_fixture_loads_real_listing():
     assert "reddit.com" in str(payload.original_url)
 
 
+def test_fetch_from_fixture_extracts_top_comments_sorted_by_score():
+    payload = fetch_from_fixture(FIXTURES_DIR / "reddit_sample.json")
+    assert 1 <= len(payload.top_comments) <= 5
+    assert all(isinstance(c, str) and c for c in payload.top_comments)
+
+
 def test_fetch_from_fixture_loads_flat_dict(tmp_path):
     flat = tmp_path / "flat.json"
     flat.write_text(
@@ -202,6 +250,7 @@ def test_fetch_from_fixture_loads_flat_dict(tmp_path):
     assert payload.raw_title == "Flat Title"
     assert payload.metadata["subreddit"] == "programming"
     assert payload.metadata["author"] == "alice"
+    assert payload.top_comments == []
 
 
 def test_fetch_from_fixture_bad_listing(tmp_path):
@@ -245,6 +294,7 @@ def test_fetch_reddit_post_browser_gallery():
         "https://preview.redd.it/one.jpg?width=1080&s=abc",
         "https://preview.redd.it/two.jpg?width=1080&s=def",
     ]
+    assert payload.top_comments == ["Comentário mais votado.", "Comentário com poucos votos."]
 
 
 def test_fetch_reddit_post_browser_single_image():

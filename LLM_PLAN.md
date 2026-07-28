@@ -117,8 +117,8 @@ código:
 | Fonte | Sans-serif bold genérica e gratuita (ex: Montserrat Bold / Poppins Bold — a definir arquivo `.ttf` exato na implementação) |
 | Cor do texto | Branco, sem itálico/decoração extra |
 | Tamanho do texto | Não trunca no código — a **LLM já gera o `image_caption` curto** (prompt com limite de ~60-80 caracteres); o código só faz quebra de linha automática (`textwrap`) se ainda assim não couber numa linha |
-| Alinhamento do texto | Esquerda |
-| **Padding (texto)** | **5px** de distância das bordas |
+| Alinhamento do texto | **Centralizado** (atualizado em 2026-07-25; era esquerda na versão original do template, mudou após teste visual) |
+| **Padding (texto)** | **5px** de distância das bordas + **margem de segurança extra** (`TEXT_SAFE_MARGIN_PX = 40px`) pra garantir que o texto nunca toque nenhuma borda, mesmo com quebra de linha |
 | Marca d'água — posição | **Canto superior direito** |
 | Marca d'água — tamanho | Pequena e discreta (~10-15% da largura da imagem) |
 | **Marca d'água — opacidade** | **70%** |
@@ -148,7 +148,7 @@ código:
 - [ ] **Qual API do Gemini usar?** (Google AI Studio / `google-genai` SDK vs Vertex AI)
 - [ ] **Qual API da OpenAI?** (Chat Completions com `response_format=json_schema` vs Responses API)
 - [ ] **Nome/forma da abstração**: uma classe `Protocol` Python simples? Ou algo mais formal (ex: LiteLLM como dependência, que já unifica múltiplos providers)?
-- [ ] **Estratégia de fallback**: se o provider A falhar (rate limit, erro), tenta o B automaticamente? Ou é só escolha manual via config?
+- [x] **Estratégia de fallback** — implementado em 2026-07-25. `app/llm/factory.py`: se o provider selecionado (`LLM_PROVIDER`) falhar -- chave ausente OU erro em runtime (rede/rate-limit/auth) da chamada real ao SDK -- tenta automaticamente o outro provider real (gemini↔openai) que esteja configurado. Nunca cai silenciosamente pro `stub` (evita legendas de baixa qualidade irem pra produção sem ninguém perceber); se todos os providers reais falharem, levanta `LLMError` com o motivo de cada falha.
 - [ ] **Few-shot examples**: vêm de onde? Arquivos fixture com exemplos "de sucesso" (Reddit/Medium) versionados no repo?
 - [ ] **Retry em erro de schema**: reenviar prompt com o erro de validação Pydantic anexado? Quantas tentativas?
 - [ ] **Cost tracking**: registrar tokens/custo por chamada desde já, ou deixar pro Módulo de Orquestração (Postgres `job_steps.cost_cents`)?
@@ -158,14 +158,84 @@ código:
 
 ### 4.1 Pendências levantadas na revisão de código do usuário (2026-07-24)
 
-- [ ] **Comentários do post no `IngestPayload`**: adicionar campo (ex: `top_comments: list[str]`) pra dar mais contexto à IA. Exige mudar `app/ingest/reddit.py` pra extrair os top comentários, além do post.
-- [ ] **Prompt em voz de redator/jornalista, não 1ª pessoa**: a IA deve escrever como quem está transformando conteúdo de terceiros em legenda, não como se fosse o dono do post. Ajuste no `PROMPT_TEMPLATE` (`app/llm/prompts.py`).
-- [ ] **Emojis no texto sobreposto (`apply_caption_text`)**: a fonte Montserrat não tem glyphs de emoji. Precisaria de fonte de emoji separada (ex: Noto Color Emoji) composta por cima do texto.
-- [ ] **Centralizar `image_caption`**: hoje é left-aligned (decisão da seção 3.4). Reavaliar se centralizado fica melhor esteticamente.
-- [ ] **Margem de segurança no texto**: o texto não deve tocar NENHUMA borda (esquerda/direita/inferior), não só o padding padrão de 5px do padrão visual. Ajustar `apply_caption_text` pra reservar uma margem própria além do `TEXT_PADDING_PX`.
-- [ ] **Gradiente mais forte**: `GRADIENT_MAX_OPACITY` (hoje 190/255) pode estar sutil demais; considerar aumentar.
-- [ ] **Crop "burro" corta trecho errado quando a IA (ex: Reddit) dá zoom em algo fora do centro**: `crop_to_canvas` hoje é sempre centralizado. Considerar crop inteligente (focal point / detecção de sujeito) no futuro.
-- [ ] **Geração de imagem via IA quando não há `media_urls`**: já é o Módulo 4b do `PLAN.md` (fallback Leonardo.ai/Stability Diffusion) — revisar/planejar com mais detalhe quando chegar a hora.
+- [x] **Comentários do post no `IngestPayload`** — implementado em 2026-07-25. Novo campo `top_comments: list[str]` no `IngestPayload`. `app/ingest/reddit.py` agora extrai os top comentários (por score) em todos os caminhos: PRAW (`_extract_top_comments_praw`), fixture JSON (`_extract_top_comments_from_listing`, lê o 2º elemento do Listing `[post, comments]`), e browser/Camoufox (`_extract_top_comments`, via `shreddit-comment[depth="0"]` + `div#{thingid}-comment-rtjson-content`). `app/llm/prompts.py` agora inclui os comentários (quando existirem) numa seção extra do prompt, como contexto adicional para a IA (não citar diretamente).
+- [x] **Prompt em voz de redator/jornalista, não 1ª pessoa** — implementado em 2026-07-25. Testado ao vivo com Gemini: saída passou a usar 3ª pessoa ("um entusiasta...", "o autor..."), sem se apropriar da experiência do post.
+- [x] **Emojis no texto sobreposto (`apply_caption_text`)** — implementado em 2026-07-25. A fonte Montserrat não tem glyphs de emoji, então adicionamos a fonte **Noto Color Emoji** (Google, gratuita, portátil entre SOs) em `app/media/assets/fonts/NotoColorEmoji.ttf`. Como essa fonte só tem um "strike" bitmap fixo (109px), os emojis são renderizados nesse tamanho nativo e depois redimensionados (via Pillow, `embedded_color=True`) para o tamanho visual da legenda. O texto é dividido em blocos (texto normal vs. emoji) por regex de faixas Unicode; cada linha é desenhada manualmente misturando os dois "fontes" (Montserrat pro texto branco, Noto Color Emoji pros emojis coloridos), mantendo a centralização e a margem de segurança já existentes. Caption sem nenhum emoji continua usando o caminho antigo (`multiline_text` com bbox exato), sem regressão.
+- [x] **Centralizar `image_caption`** — implementado em 2026-07-25. `apply_caption_text` agora centraliza o bloco de texto horizontalmente (usando `multiline_textbbox`/`multiline_text` com `align="center"`), mantendo a margem de segurança em ambos os lados.
+- [x] **Margem de segurança no texto** — implementado em 2026-07-25 junto com a correção do gradiente. Nova constante `TEXT_SAFE_MARGIN_PX = 40` reserva espaço extra além do `TEXT_PADDING_PX` padrão; o texto agora é ancorado usando o bounding box real da tinta (`multiline_textbbox`), não mais métricas de fonte aproximadas — corrige um bug em que o texto vazava ~10px além da margem calculada.
+- [x] **Gradiente mais forte** — implementado em 2026-07-25. `GRADIENT_MAX_OPACITY` subiu de 190 para 225.
+- [x] **Crop "burro" corta trecho errado quando a IA (ex: Reddit) dá zoom em algo fora do centro** — implementado em 2026-07-25. `crop_to_canvas` agora usa uma heurística leve de "energia de bordas" (`ImageFilter.FIND_EDGES` + `numpy`, sem depender de OpenCV/detecção de rosto): desloca a janela de corte pra onde há mais detalhe visual (bordas/textura), em vez de sempre cortar no centro geométrico. Pra imagens uniformes (sem "sujeito" identificável), o comportamento cai de volta pro crop centralizado de antes — sem regressão.
+- [x] **Geração de imagem via IA quando não há `media_urls`** — implementado em 2026-07-25. Depois de testar Gemini (nano banana) e Leonardo.ai/Stability (todos exigem plano pago/créditos), optamos pelo **Pollinations.ai** (100% gratuito, sem API key, sem cartão). Mudanças: (1) `ImagePost` ganhou o campo `visual_prompt` (a LLM agora gera 3 saídas: `post_caption`, `image_caption`, `visual_prompt` -- este último em inglês, descrevendo a cena com base no post completo, usado só como fallback); (2) novo módulo `app/media/ai_image.py` (`generate_ai_image`) chama a API da Pollinations via HTTP GET simples; (3) `build_carousel` agora aceita `visual_prompt` opcional e gera uma imagem via IA quando `media_urls` está vazio (arquivo temporário é limpo depois de processado); (4) CLI (`python -m app image-post`) não trava mais quando o post não tem imagem -- avisa e segue com o fallback. Testado ao vivo: LLM stub + Pollinations.ai real geraram um carrossel completo e coerente com o texto do post.
+  - **Ajuste em 2026-07-27** (após teste real revelar artefatos visuais, ex: ícone/UI alucinado na tela de um celular): descoberto que modelos de difusão **não lidam bem com negação** -- pedir "sem mãos"/"sem tela ligada"/"sem texto" no prompt tende a fazer esses elementos aparecerem mesmo assim, em vez de evitá-los. Reescrito `PROMPT_TEMPLATE` (seção do `visual_prompt`) e `app/llm/stub.py` para instruir/gerar **apenas descrições positivas** (ex: "celular repousando virado pra baixo sobre a mesa" em vez de "sem tela visível"; objetos sozinhos em vez de "sem mãos/pessoas"). Também removido o parâmetro `enhance=true` da chamada à Pollinations.ai em `app/media/ai_image.py` -- ele piorou a aderência ao prompt original em teste comparativo; mantido `model=flux` fixo (melhor fotorrealismo que `turbo`). Validado com teste end-to-end real (Gemini + Pollinations.ai): resultado sem ícones/UI alucinados, sem mãos, sem texto.
+  - **2º ajuste no mesmo dia** (novo teste real revelou: celular deformado + cena genérica demais, sem relação clara com o tema "privacidade"): (1) instruções agora pedem que a cena inclua um **objeto simbólico concreto** que represente o conceito central do post (ex: privacidade → cadeado físico ao lado do celular), em vez de só "um objeto qualquer sozinho"; (2) para celular/laptop/eletrônicos, instrução para descrever a cena como **flat lay** (câmera direto de cima, objetos deitados) -- ângulos baixos/perspectiva dramática estavam deformando o aparelho (proporções erradas, formas duplicadas). Testado de novo com o mesmo post ("privacidade no smartphone"): celular renderizado sem deformação, cadeado/chave visíveis e tematicamente coerentes.
+  - **3º ajuste no mesmo dia** (mais testes mostraram que objetos com detalhes finos/mecânicos -- teclados, fechaduras com o miolo à mostra -- ainda saem deformados no modelo gratuito; cotou-se testar Leonardo.ai como alternativa paga, mas a API exige créditos próprios separados do plano do app web -- não temos crédito de API ainda, então essa rota foi pausada, chave `LEONARDO_API_KEY` guardada no `.env` para o futuro). Em vez disso, **mudança de estratégia** inspirada num exemplo de referência (`data/example/post.jpg`, estilo TecMundo): a foto gerada por IA não precisa representar o tema com precisão simbólica -- pode ser apenas um **fundo desfocado/atmosférico** (bokeh, fora de foco, moody/cinematográfico), já que o significado visual do post vem do texto sobreposto (título) e da marca d'água, não da cena em si. `PROMPT_TEMPLATE` e `app/llm/stub.py` reescritos para pedir prompts curtos e simples (1-2 frases) descrevendo apenas clima/atmosfera genérica ligada ao domínio do post (ex: "a blurred laptop screen with soft neon light in a dark room, bokeh, cinematic"), sem tentar retratar objetos específicos em foco nítido. Testado com 2 posts diferentes (privacidade em smartphone, remoção de anúncios do Spotify): resultado consistente, sem deformações, visualmente alinhado ao estilo de referência.
+
+### 4.2 Identidade visual padronizada ("boilerplate") — implementado em 2026-07-27
+
+Depois de simplificar o `visual_prompt` (seção 4.1), o usuário adicionou 4 exemplos
+de referência reais (`data/example/post.jpg` a `post4.jpg`, posts de páginas do
+Instagram estilo TecMundo) e pediu pra adotar o mesmo template visual em todos os
+posts, independente do fundo ser uma foto real (`media_urls`) ou gerada por IA.
+Padrão identificado nos 4 exemplos: faixa **preta sólida** (não gradiente) na
+base da imagem, um **selo/badge colorido de categoria**, título em **caixa alta**
+logo abaixo do selo, uma linha de **CTA** menor/mais clara abaixo do título, e a
+marca d'água/logo no canto superior direito (mantido como já estava).
+
+Decisões confirmadas com o usuário:
+
+| Elemento | Especificação |
+|---|---|
+| Categoria | Novo campo `category` no `ImagePost`, **gerado pela LLM** (4ª saída do prompt), tipado como `Literal[...]` com lista fixa: `CURIOSIDADE, TECNOLOGIA, TUTORIAL, HISTÓRIA, DESABAFO, NOTÍCIA` |
+| Fonte do título | Mantida a Montserrat Bold já usada -- só passou a renderizar em **CAIXA ALTA** (`.upper()`), sem baixar fonte nova |
+| Cor do selo/badge | Cor única de marca, fixa (não varia por categoria): **`#0E5294`** (RGB 14, 82, 148) -- extraída por amostragem de pixel de `data/example/post3.jpg` |
+| Texto do CTA | String fixa **"Veja a legenda"**, sem seta/emoji, cor cinza-claro (`CTA_TEXT_COLOR`), fonte menor que o título |
+| Logo/marca d'água | Mantido o asset já existente (`DEFAULT_WATERMARK_PATH`), sem mudanças |
+| Faixa de fundo | Trocada de gradiente (`apply_gradient_overlay`, removida) para **retângulo preto 100% opaco** (`BAR_COLOR`), com altura calculada dinamicamente a partir do conteúdo real (badge + título quebrado em N linhas + CTA + margens), em vez de uma proporção fixa da imagem -- garante que títulos de 1 ou 3 linhas nunca fiquem cortados nem com espaço vazio excessivo |
+
+Implementação (`app/media/image_post.py`): `apply_gradient_overlay` +
+`_apply_caption_text_plain`/`_apply_caption_text_with_emoji` foram substituídos
+por um único `apply_caption_text(img, text, category)` que desenha, de cima
+pra baixo: (1) a barra preta opaca (altura calculada bottom-up), (2) o badge
+de categoria (retângulo arredondado + texto em caixa alta), (3) o título
+(caixa alta, múltiplas linhas, com o mesmo suporte a emoji colorido de antes),
+(4) o texto do CTA. `build_carousel` ganhou um novo parâmetro obrigatório
+`category: str` (logo após `image_caption`); `app/__main__.py` e todos os
+testes foram atualizados para passar `image_post.category`. Testado ao vivo
+com 2 posts (título de 3 linhas e de 1 linha) -- barra se ajusta corretamente
+em ambos os casos, resultado visualmente alinhado aos 4 exemplos de referência.
+Suíte completa: 73/73 testes passando após a mudança.
+
+### 4.3 Ajuste: seta no CTA + faixa "dome" gradiente (não mais retângulo sólido) — implementado em 2026-07-27
+
+Depois do primeiro teste real da seção 4.2, o usuário pediu dois ajustes: (1) o
+CTA "Veja a legenda" precisava de uma seta (referência original tinha "⬇"); (2)
+a faixa preta sólida ficou muito "pesada" -- pediu pra reduzir a opacidade ou,
+alternativa preferida, estilizar como um **gradiente circular/dome** em vez de
+um retângulo de bordas retas. Perguntado explicitamente, o usuário escolheu a
+opção do gradiente circular.
+
+- **Seta no CTA**: em vez de um emoji colorido (que exigiria a fonte
+  Noto Color Emoji só para um caractere), usamos a seta unicode simples
+  `↓` (U+2193, downwards arrow) -- confirmado que a própria Montserrat Bold já
+  tem esse glyph, sem precisar de fonte extra. `CTA_TEXT = "Veja a legenda ↓"`.
+- **Faixa "dome" gradiente**: `apply_gradient_overlay`/retângulo sólido
+  substituído por `_dome_gradient_bar()`, que gera (via `numpy`) uma máscara
+  alpha em forma de "domo": totalmente opaca (`BAR_MAX_OPACITY = 235`, não mais
+  255 -- levemente translúcida mesmo no centro) do centro horizontal para baixo,
+  com a borda superior da região opaca curvando pra baixo (ficando mais
+  transparente) em direção às laterais -- deixa um pouco da foto aparecer nos
+  cantos superiores da faixa, em vez de um corte reto. A transição usa
+  suavização tipo smoothstep (`BAR_DOME_FEATHER_PX = 90`) ao invés de uma
+  borda dura. Matematicamente: a curva de transição é a borda superior de uma
+  elipse centrada abaixo do topo da faixa (`peak_y`), com semi-eixo horizontal
+  = metade da largura do canvas e semi-eixo vertical = `BAR_DOME_HEIGHT_PX = 130`
+  (controla o quão "arqueado" fica o domo). O badge/título/CTA continuam
+  posicionados a partir do mesmo `bar_top`/`peak_y` de antes, então o texto
+  sempre cai na parte já totalmente opaca do domo (a curva só afeta os cantos
+  vazios acima do conteúdo). Testado ao vivo com os mesmos 2 posts da seção
+  4.2 -- resultado com a curva visível e sutil, sem comprometer a legibilidade
+  do texto. Suíte completa: 73/73 (1 teste reescrito para refletir a nova
+  faixa em domo em vez do retângulo sólido).
 
 ---
 
